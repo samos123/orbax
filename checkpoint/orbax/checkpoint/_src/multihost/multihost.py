@@ -260,6 +260,7 @@ def get_barrier_sync_fn(
 
 def _unique_barrier_key(key: str) -> str:
   """Function that can be overridden for testing purposes."""
+  logging.info('key: %s', key)
   return key
 
 
