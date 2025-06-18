@@ -206,6 +206,7 @@ def handler_with_options(
         ARRAY_METADATA_STORE
     ),
     enable_write_sharding_file: bool = True,
+    partial_load: bool = False,
 ):
   """Registers handlers with OCDBT support and resets when done."""
   type_handler_registry = copy.deepcopy(
@@ -233,7 +234,10 @@ def handler_with_options(
           saving=options_lib.PyTreeOptions.Saving(
               create_array_storage_options_fn=create_array_storage_options_fn,
               pytree_metadata_options=pytree_metadata_options,
-          )
+          ),
+          loading=options_lib.PyTreeOptions.Loading(
+              partial_load=partial_load,
+          ),
       ),
   )
 
@@ -1860,13 +1864,11 @@ class PyTreeHandlerTestBase:
 
       with handler_with_options(
           use_ocdbt=use_ocdbt,
-          array_metadata_store=array_metadata_store_lib.Store(),
       ) as save_handler:
         save_handler.save(self.directory, pytree)
 
       with handler_with_options(
           use_ocdbt=use_ocdbt,
-          array_metadata_store=array_metadata_store_lib.Store(),
       ) as load_handler:
         restored = load_handler.load(self.directory)
         test_utils.assert_tree_equal(self, pytree, restored)
@@ -1922,7 +1924,6 @@ class PyTreeHandlerTestBase:
     ):
       with handler_with_options(
           use_ocdbt=use_ocdbt,
-          array_metadata_store=array_metadata_store_lib.Store(),
       ) as handler:
         handler.save(self.directory, self.pytree)
 
@@ -1966,7 +1967,6 @@ class PyTreeHandlerTestBase:
       """Test saving and restoring placeholder."""
       with handler_with_options(
           use_ocdbt=use_ocdbt,
-          array_metadata_store=array_metadata_store_lib.Store(),
       ) as save_handler:
         save_handler.save(self.directory, self.pytree)
 
@@ -1981,7 +1981,6 @@ class PyTreeHandlerTestBase:
 
         with handler_with_options(
             use_ocdbt=use_ocdbt,
-            array_metadata_store=array_metadata_store_lib.Store(),
         ) as restore_handler:
           restored = restore_handler.load(self.directory, reference_item)
           test_utils.assert_tree_equal(self, expected, restored)
@@ -1994,7 +1993,6 @@ class PyTreeHandlerTestBase:
 
         with handler_with_options(
             use_ocdbt=use_ocdbt,
-            array_metadata_store=array_metadata_store_lib.Store(),
         ) as restore_handler:
           with self.assertRaisesRegex(
               ValueError, 'User-provided restore item and on-disk value'
@@ -2007,9 +2005,59 @@ class PyTreeHandlerTestBase:
 
         with handler_with_options(
             use_ocdbt=use_ocdbt,
-            array_metadata_store=array_metadata_store_lib.Store(),
         ) as restore_handler:
           with self.assertRaisesRegex(
               ValueError, 'User-provided restore item and on-disk value'
           ):
             restore_handler.load(self.directory, reference_item)
+
+    @parameterized.product(use_ocdbt=(True, False))
+    def test_partial_restore_with_omission(self, use_ocdbt: bool):
+      """Basic save and restore test."""
+      directory = self.directory / 'partial_restore'
+
+      with handler_with_options(
+          use_ocdbt=use_ocdbt,
+      ) as save_handler:
+        save_handler.save(directory, self.pytree)
+
+      with self.subTest('success'):
+        with handler_with_options(
+            use_ocdbt=use_ocdbt,
+            partial_load=True,
+        ) as restore_handler:
+          # Create a new pytree structure with the same leaves.
+          # Leaves (ShapeDtypeStruct) are immutable and can be shared.
+          reference_item = jax.tree.map(lambda x: x, self.abstract_pytree)
+          # Omit 'b', 'c.e', and 'x' from the reference item.
+          del reference_item['b']
+          del reference_item['c']['e']
+          del reference_item['x']
+          expected = {
+              'a': self.pytree['a'],
+              'c': {
+                  'a': self.pytree['c']['a'],
+              },
+              'y': self.pytree['y'],
+          }
+          restored = restore_handler.load(directory, reference_item)
+          test_utils.assert_tree_equal(self, expected, restored)
+
+      with self.subTest('extra_leaf'):
+        with handler_with_options(
+            use_ocdbt=use_ocdbt,
+            partial_load=True,
+        ) as restore_handler:
+          # Create a new pytree structure with the same leaves.
+          # Leaves (ShapeDtypeStruct) are immutable and can be shared.
+          reference_item = jax.tree.map(lambda x: x, self.abstract_pytree)
+          del reference_item['b']
+          del reference_item['c']['e']
+          del reference_item['x']
+          # Add an extra leaf to the reference item.
+          reference_item['z'] = jax.ShapeDtypeStruct([0], np.int64)
+          with self.assertRaisesRegex(
+              ValueError,
+              r"Missing 1 keys in structure path \(\), including: \['z'\]",
+          ):
+            restore_handler.load(directory, reference_item)

@@ -66,7 +66,6 @@ PyTreeCheckpointHandler = pytree_checkpoint_handler.PyTreeCheckpointHandler
 ProcessMetadataCheckpointHandler = (
     process_metadata_checkpoint_handler.ProcessMetadataCheckpointHandler
 )
-unique_barrier_key = multihost._unique_barrier_key  # pylint: disable=protected-access
 ChunkId = local_checkpoint_data_debugging.ChunkId
 get_present_and_missing_chunks = (
     local_checkpoint_data_debugging.get_present_and_missing_chunks
@@ -178,6 +177,9 @@ class PersistentCheckpointOptions:
     checkpoints. Must be None or non-negative. When set, checkpoints
     may be considered for deletion when there are more than `max_to_keep`
     checkpoints present.
+  keep_period:
+    If set, any existing checkpoints matching checkpoint_step % keep_period == 0
+    will not be deleted.
   should_save_fn:
     Predicate callable to check if given step can be saved. This callable
     accepts step number and optional latest step number as param and returns
@@ -187,6 +189,7 @@ class PersistentCheckpointOptions:
 
   save_interval_steps: int = 1000
   max_to_keep: Optional[int] = None
+  keep_period: Optional[int] = None
   should_save_fn: Optional[Callable[[int, Optional[int]], bool]] = None
 
 
@@ -319,7 +322,6 @@ def _process_local_to_global(
     *,
     timeout: int,
     barrier_id: _BarrierIdentifier,
-    slice_id: Optional[int] = None,
 ) -> Dict[int, Set[int]]:
   """Shares a sequence of host-local integers across given processes.
 
@@ -328,31 +330,20 @@ def _process_local_to_global(
     barrier_processes: A set of processes to share the set of values with.
     timeout: The timeout in seconds for inter-process coordination.
     barrier_id: Barrier identifier.
-    slice_id: The slice id. Only needed if multiple slices need to run the same
-      barrier in parallel, but only sync intra-slice, not inter-slice.
 
   Returns:
     A mapping of process index to the sequence of local values on that process.
     The result will have an entry for every process in `barrier_processes`.
   """
-  barrier_name = (
-      f'{barrier_id.name}_{slice_id}' if slice_id else barrier_id.name
-  )
-  # Need to include barrier processes because there can be identical calls, just
-  # with different participating processes.
-  barrier_processes_as_string = ''.join(str(p) for p in barrier_processes)
-  barrier_name_and_id = (
-      f'{barrier_name}_{barrier_id.get_counter()}_{barrier_processes_as_string}'
-  )
-
+  barrier_name_and_id = f'{barrier_id.name}_{barrier_id.get_counter()}'
   client = multihost.get_jax_distributed_client()
   broadcast_dir_key = f'broadcast_{barrier_name_and_id}/'
-  broadcast_dir_key = unique_barrier_key(broadcast_dir_key) + '/'
+  broadcast_dir_key = multihost._unique_barrier_key(broadcast_dir_key) + '/'  # pylint: disable=protected-access
   broadcast_key = broadcast_dir_key + str(multihost.process_index())
   client.key_value_set(broadcast_key, ','.join([str(s) for s in values]))
 
   barrier_key = f'barrier_{barrier_name_and_id}'
-  barrier_key = unique_barrier_key(barrier_key)
+  barrier_key = multihost._unique_barrier_key(barrier_key)  # pylint: disable=protected-access
   logging.vlog(
       1,
       '[process=%s] Waiting at barrier %s',
@@ -385,11 +376,8 @@ def _all_devices_excepting_slice(
     replica_id: int = 0,
     replica_axis_index: int = 0,
 ) -> np.ndarray:
-  if hasattr(jax.devices()[0], 'slice_index'):
-    get_slice_id = np.vectorize(lambda x: x.slice_index)
-    return devices[get_slice_id(devices) != replica_id]
-  else:
-    return np.delete(devices, replica_id, axis=replica_axis_index)
+  print(f"{devices=}")
+  return np.delete(devices, replica_id, axis=replica_axis_index)
 
 
 def _get_global_broadcast_fn() -> Callable[[jax.Array], jax.Array]:
@@ -652,6 +640,7 @@ def _get_persistent_options(
   return checkpoint_manager.CheckpointManagerOptions(
       save_interval_steps=options.persistent.save_interval_steps,
       max_to_keep=options.persistent.max_to_keep,
+      keep_period=options.persistent.keep_period,
       step_name_format=options.step_name_format,
       create=False,
       cleanup_tmp_directories=options.cleanup_tmp_directories,
@@ -1251,6 +1240,7 @@ class _MultisliceCheckpointManager(
     multihost.sync_global_processes('local_restore_pre_broadcast')
 
     start_broadcast = time.time()
+    print(f"before broadcast {self._global_mesh=}")
     shared_states, _ = multislice.broadcast_one_replica_to_all(
         in_tree,
         self._global_mesh,

@@ -131,6 +131,7 @@ def create_v0_restore_args(
   return base_pytree_checkpoint_handler.BasePyTreeRestoreArgs(
       item=abstract_checkpointable,
       restore_args=restore_args,
+      partial_restore=context.pytree_options.loading.partial_load,
   )
 
 
@@ -201,7 +202,7 @@ class PyTreeHandler(CheckpointableHandler[PyTree, PyTree]):
 
     # TODO(b/398310070): Move operation ID generation to `Context`.
     operation_id = (
-        synchronization.HandlerAwaitableSignalOperationIdGenerator.get_current_operation_id()
+        synchronization.OperationIdGenerator.get_current_operation_id()
     )
     # Needed to differentiate between different handlers when we have multiple
     # PyTreeHandlers performing a save.

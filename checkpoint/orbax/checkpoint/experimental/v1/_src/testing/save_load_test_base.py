@@ -864,3 +864,52 @@ class SaveLoadTestBase:
       self.assertFalse(self.directory.exists())
       time.sleep(3)
       self.assertTrue(self.directory.exists())
+
+    def test_partial_restore_placeholder(self):
+      ocp.save_pytree(self.directory, self.pytree)
+
+      reference_pytree = jax.tree.map(lambda x: x, self.abstract_pytree)
+      reference_pytree['b'] = PLACEHOLDER
+      reference_pytree['c']['e'] = PLACEHOLDER
+      reference_pytree['x'] = PLACEHOLDER
+
+      expected = {
+          'a': self.pytree['a'],
+          'b': PLACEHOLDER,
+          'c': {
+              'a': self.pytree['c']['a'],
+              'e': PLACEHOLDER,
+          },
+          'x': PLACEHOLDER,
+          'y': self.pytree['y'],
+      }
+
+      loaded = ocp.load_pytree(self.directory, reference_pytree)
+      test_utils.assert_tree_equal(self, expected, loaded)
+
+    def test_partial_restore_omission(self):
+      ocp.save_pytree(self.directory, self.pytree)
+
+      reference_pytree = jax.tree.map(lambda x: x, self.abstract_pytree)
+      del reference_pytree['b']
+      del reference_pytree['c']['e']
+      del reference_pytree['x']
+
+      expected = {
+          'a': self.pytree['a'],
+          'c': {
+              'a': self.pytree['c']['a'],
+          },
+          'y': self.pytree['y'],
+      }
+
+      with ocp.Context(
+          pytree_options=ocp.options.PyTreeOptions(
+              loading=ocp.options.PyTreeOptions.Loading(
+                  partial_load=True,
+              )
+          )
+      ):
+        loaded = ocp.load_pytree(self.directory, reference_pytree)
+
+      test_utils.assert_tree_equal(self, expected, loaded)
