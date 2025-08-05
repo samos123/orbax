@@ -161,6 +161,8 @@ def consistent_restore_mesh(
   new_mesh_devices = np.array(new_flattened_mesh_devices).reshape(
       user_mesh.devices.shape
   )
+  logging.info(f"{previous_flattened_mesh_device_ids=}")
+  logging.info(f"{new_flattened_mesh_devices=}")
   return jax.sharding.Mesh(new_mesh_devices, user_mesh.axis_names)
 
 
