@@ -379,7 +379,19 @@ def _all_devices_excepting_slice(
     replica_id: int = 0,
     replica_axis_index: int = 0,
 ) -> np.ndarray:
-  return np.delete(devices, replica_id, axis=replica_axis_index)
+  n_slice = multislice.slice_count()
+  n_replica = devices.shape[replica_axis_index]
+  if n_slice == n_replica:
+    return np.delete(devices, replica_id, axis=replica_axis_index)
+  else:
+    assert n_replica % n_slice == 0
+    step = n_replica // n_slice
+    span = range(replica_id * step, (replica_id + 1) * step)
+    return np.delete(
+        devices,
+        span,
+        axis=replica_axis_index,
+    )
 
 
 def _get_global_broadcast_fn() -> Callable[[jax.Array], jax.Array]:
@@ -1054,8 +1066,19 @@ class _MultisliceCheckpointManager(
         replica_id=self._slice_id,
         replica_axis_index=self._replica_axis_index,
     )
+
+    slice_device_ids = set(d.id for d in slice_devices.flatten())
+    slice_pids = set(d.process_index for d in slice_devices.flatten())
+    expected_slice_device_ids = set(d.id for d in mesh.devices.flatten() if d.process_index in slice_pids)
+
+    if expected_slice_device_ids != slice_device_ids:
+        raise ValueError(
+            f'Expected slice devices {expected_slice_device_ids} do not match'
+            f' actual slice devices {slice_device_ids}.'
+        )
+
     single_slice_mesh_shape = [
-        1 if i == self._replica_axis_index else d
+        -1 if i == self._replica_axis_index else d
         for i, d in enumerate(mesh.devices.shape)
     ]
     slice_mesh = jax.sharding.Mesh(
@@ -1090,6 +1113,8 @@ class _MultisliceCheckpointManager(
         ),
         self._abstract_state,
     )
+
+
     original_single_slice_shardings_tuple = tuple(
         jax.tree.flatten(original_single_slice_shardings)[0]
     )

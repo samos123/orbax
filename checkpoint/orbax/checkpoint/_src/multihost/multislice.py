@@ -62,11 +62,23 @@ def replica_devices(
     replica_id: int = 0,
     replica_axis_index: int = 0,
 ) -> np.ndarray:
-  return np.take(
-      global_mesh.devices,
-      replica_id,
-      axis=replica_axis_index,
-  )
+  num_replicas = replica_count(global_mesh, replica_axis_index=replica_axis_index)
+  _num_replicas = global_mesh.devices.shape[replica_axis_index]
+  if num_replicas == _num_replicas:
+    return np.take(
+        global_mesh.devices,
+        replica_id,
+        axis=replica_axis_index,
+    )
+  else:
+    assert _num_replicas % num_replicas == 0
+    step = _num_replicas // num_replicas
+    span = range(replica_id * step, (replica_id + 1) * step)
+    return np.take(
+        global_mesh.devices,
+        span,
+        axis=replica_axis_index,
+    )
 
 
 def replica_count(
@@ -75,7 +87,8 @@ def replica_count(
   """Number of slices implied by the mesh's replica dimension."""
   if len(global_mesh.shape_tuple) == 1:
     return 1
-  return global_mesh.devices.shape[replica_axis_index]
+  # assert slice_count() == global_mesh.devices.shape[replica_axis_index]
+  return slice_count()
 
 
 def local_replica_devices(

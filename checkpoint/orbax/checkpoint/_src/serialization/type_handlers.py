@@ -1482,10 +1482,10 @@ class SingleReplicaArrayHandler(ArrayHandler):
     }
     if primary_replica_ids != expected_primary_replica_ids:
       raise InvalidShardingError(
-          'The provided sharding is not valid. The primary replica has the'
+          f'[replica_axis_index={self.replica_axis_index}, mesh shape= {sharding.mesh.devices.shape}] The provided sharding is not valid. The primary replica has the'
           f' following devices: {primary_replica_ids}, but process indices'
           ' associated with primary replica devices are expected to be:'
-          f' {primary_replica_pids}.'
+          f' {expected_primary_replica_ids}.'
       )
 
     return primary_replica_pids
