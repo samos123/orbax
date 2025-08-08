@@ -1296,11 +1296,25 @@ class _MultisliceCheckpointManager(
         step,
         directory or self._persistent_directory,
     )
+
+    def _get_restore_args(arr):
+      sharding = arr.sharding
+      single_replica_sharding = self._get_single_slice_sharding(
+          mesh=sharding.mesh,
+          pspec=sharding.spec,
+      )
+      return type_handlers.SingleReplicaArrayRestoreArgs(
+          sharding=sharding,
+          single_replica_sharding=single_replica_sharding,
+      )
+
+    restore_args = jax.tree.map(
+        _get_restore_args,
+        self._abstract_state,
+    )
     args = args_lib.PyTreeRestore(
         item=self._abstract_state,
-        restore_args=checkpoint_utils.construct_restore_args(
-            self._abstract_state
-        ),
+        restore_args=restore_args,
     )
 
     # Create a temporarily read-only PersistentCheckpointManager that will
@@ -1315,6 +1329,15 @@ class _MultisliceCheckpointManager(
             barrier_sync_key_prefix='persistent_global',
         ),
     )
+    registry = type_handlers.create_type_handler_registry(
+        (
+            jax.Array,
+            type_handlers.SingleReplicaArrayHandler(
+                replica_axis_index=self._replica_axis_index,
+                primary_replica_id=_PRIMARY_REPLICA_ID,
+            ),
+        ),
+    )
     with checkpoint_manager.CheckpointManager(
         self._persistent_directory,
         options=persistent_options,
@@ -1322,6 +1345,7 @@ class _MultisliceCheckpointManager(
         item_handlers=PyTreeCheckpointHandler(
             use_ocdbt=True,
             use_zarr3=True,
+            type_handler_registry=registry,
         ),
     ) as pcm:
       try:
