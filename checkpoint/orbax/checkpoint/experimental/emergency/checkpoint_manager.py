@@ -1296,41 +1296,100 @@ class _MultisliceCheckpointManager(
         step,
         directory or self._persistent_directory,
     )
-    args = args_lib.PyTreeRestore(
-        item=self._abstract_state,
-        restore_args=checkpoint_utils.construct_restore_args(
-            self._abstract_state
+    shape_dtypes, tree_defs = jax.tree.flatten(self._abstract_state)
+    single_slice_shardings = jax.tree.map(
+        lambda arr: self._get_single_slice_sharding(
+            mesh=arr.sharding.mesh,
+            pspec=arr.sharding.spec,
         ),
+        self._abstract_state,
+    )
+    single_slice_shardings_tuple = tuple(
+        jax.tree.flatten(single_slice_shardings)[0]
     )
 
-    # Create a temporarily read-only PersistentCheckpointManager that will
-    # synchronize the restoration with global processes.
-    persistent_options = checkpoint_manager.CheckpointManagerOptions(
-        step_name_format=self._options.step_name_format,
-        create=False,
-        cleanup_tmp_directories=False,
-        read_only=True,
-        enable_async_checkpointing=False,
-        multiprocessing_options=checkpoint_manager.MultiprocessingOptions(
-            barrier_sync_key_prefix='persistent_global',
-        ),
+    if self.in_primary_slice:
+      # Create a temporarily read-only PersistentCheckpointManager that will
+      # synchronize the restoration with global processes.
+      persistent_multiprocessing_options = (
+          checkpoint_manager.MultiprocessingOptions(
+              primary_host=self._persistent_primary_host,
+              active_processes=multihost.unique_processes_from_devices(
+                  multislice.replica_devices(
+                      self._global_mesh,
+                      replica_axis_index=self._replica_axis_index,
+                      replica_id=_PRIMARY_REPLICA_ID,
+                  )
+              ),
+              barrier_sync_key_prefix='persistent_primary_slice',
+          )
+      )
+      persistent_options = checkpoint_manager.CheckpointManagerOptions(
+          step_name_format=self._options.step_name_format,
+          create=False,
+          cleanup_tmp_directories=False,
+          read_only=True,
+          enable_async_checkpointing=False,
+          multiprocessing_options=persistent_multiprocessing_options,
+      )
+      restore_args = checkpoint_utils.construct_restore_args(
+          self._abstract_state, single_slice_shardings
+      )
+      args = args_lib.PyTreeRestore(
+          item=self._abstract_state,
+          restore_args=restore_args,
+      )
+      with checkpoint_manager.CheckpointManager(
+          self._persistent_directory,
+          options=persistent_options,
+          metadata=self._metadata,
+          item_handlers=PyTreeCheckpointHandler(
+              use_ocdbt=True,
+              use_zarr3=True,
+          ),
+      ) as pcm:
+        try:
+          single_slice_pytree = pcm.restore(
+              step, args=args, directory=directory
+          )
+        except FileNotFoundError as e:
+          raise FileNotFoundError(
+              'No steps found in either local or persistent storage when'
+              f' requesting restoration of step {step}.'
+          ) from e
+      in_tree = tuple(jax.tree.flatten(single_slice_pytree)[0])
+    else:
+
+      @functools.partial(
+          jax.jit,
+          static_argnums=0,
+          out_shardings=single_slice_shardings_tuple,
+      )
+      def create_zeros(shape_dtype_tup):
+        return jax.tree.map(
+            lambda sd: jnp.zeros(sd.shape, dtype=sd.dtype), shape_dtype_tup
+        )
+
+      zeros_pytree = create_zeros(tuple(shape_dtypes))
+      in_tree = tuple(zeros_pytree)
+
+    multihost.sync_global_processes('persistent_restore_pre_broadcast')
+
+    start_broadcast = time.time()
+    shared_states, _ = multislice.broadcast_one_replica_to_all(
+        in_tree,
+        self._global_mesh,
+        replica_axis_index=self._replica_axis_index,
+        is_source=self.in_primary_slice,
     )
-    with checkpoint_manager.CheckpointManager(
-        self._persistent_directory,
-        options=persistent_options,
-        metadata=self._metadata,
-        item_handlers=PyTreeCheckpointHandler(
-            use_ocdbt=True,
-            use_zarr3=True,
-        ),
-    ) as pcm:
-      try:
-        return pcm.restore(step, args=args, directory=directory)
-      except FileNotFoundError as e:
-        raise FileNotFoundError(
-            'No steps found in either local or persistent storage when'
-            f' requesting restoration of step {step}.'
-        ) from e
+    broadcast_elapsed_s = time.time() - start_broadcast
+    jax.monitoring.record_event_duration_secs(
+        '/orbax/emergency/checkpoint/read/broadcast_duration_secs',
+        broadcast_elapsed_s,
+    )
+    logging.info('Finished broadcasting in %.2f', broadcast_elapsed_s)
+
+    return jax.tree.unflatten(tree_defs, shared_states)
 
   def restore(
       self,
