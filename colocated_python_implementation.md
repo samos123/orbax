@@ -193,3 +193,34 @@ When loading a checkpoint using this mechanism, the system performs a **full mat
 -   **Host RAM Requirement**: The worker machine must have enough CPU RAM to hold the *largest* local shard of the model parameters. 
 -   **No "Chunked" Transfer**: Data is not streamed in small chunks (e.g., 100MB at a time) through to the TPU. It is "store-and-forward" at the granularity of the full shard.
 -   **Concurrency**: While individual shards are buffered, `asyncio.gather` is used to process multiple parameters concurrently, which can increase peak host memory usage if many large parameters are loaded simultaneously.
+
+## 5. Potential Improvements: Enabling True Streaming
+
+To answer the question *"Would it be possible to do some form of streaming where we release memory after each tensorstore spec?"*: **Yes, but it requires code changes.**
+
+### The Bottleneck
+Currently, `ArrayHandler.deserialize` invokes the dispatcher once for all requested parameters. The dispatcher (and the underlying `asyncio.gather` on the worker) waits for **all** arrays to be materialized in host memory before returning the list of `jax.Array`s to the driver. This accumulates peak memory usage equal to the sum of all local shards in the batch.
+
+### Solution Strategy
+To achieve "streaming" (or at least granular batching) where memory is released after each parameter (or small group):
+
+1.  **Batching at the Driver**: The `ArrayHandler.deserialize` method should break the list of `infos` (parameters) into smaller chunks (e.g., 1 parameter at a time, or 1GB batches).
+2.  **Sequential Dispatch**: It should call `self._dispatcher.dispatch(...)` sequentially for each chunk.
+3.  **Early Release**: After each dispatch call returns, the resulting `jax.Array`s (which are now effectively on the TPU, assuming the dispatcher moved them there) can have their CPU references dropped or handled by JAX's memory management.
+
+Basically, instead of:
+```python
+# Current: All-at-once
+all_results = dispatcher.dispatch(deserialize_all, args=all_params)
+```
+We would need:
+```python
+# Proposed: Streaming/Batching
+all_results = []
+for params_batch in batched(all_params):
+    batch_results = dispatcher.dispatch(deserialize_batch, args=params_batch)
+    all_results.extend(batch_results)
+    # At this point, Host RAM for batch_results should be releasable 
+    # as the data is already transferred to TPU by the dispatcher's output logic.
+```
+This would cap peak Host RAM usage to the size of the largest single batch (or single parameter).
