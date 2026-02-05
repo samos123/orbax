@@ -166,7 +166,7 @@ def _sync_deserialize_arrays(infos, args, shardings, ...):
 1.  The `shardings` passed to it have been transformed by `dispatcher._transform_pytree_shardings` to be **CPU shardings**.
 2.  `tensorstore` operations (inside `_deserialize_arrays`) thus read data directly into host memory on that specific worker node.
 3.  Because the function is running under `@cp.colocated_python`, JAX knows this is local to that process group.
-        
+
 ## Summary of Data Flow
 
 1.  **Driver**: Calls `ArrayHandler.deserialize`.
@@ -176,3 +176,20 @@ def _sync_deserialize_arrays(infos, args, shardings, ...):
 5.  **Worker CPU**: `TensorStore` reads checkpoint bytes from storage -> Worker RAM.
 6.  **Worker CPU**: `ColocatedPythonDispatcher` receives the CPU arrays.
 7.  **Transfer**: `_to_final_specs` moves data from Worker RAM -> Worker TPU HBM (`jax.device_put`).
+
+## 4. Memory Usage & Streaming Behavior
+
+**Key Finding**: The current implementation is **Buffered (per-shard)**, not Streamed.
+
+### Behavior
+When loading a checkpoint using this mechanism, the system performs a **full materialization** of the host-local shard into Host RAM before transferring it to the accelerator (TPU/GPU).
+
+1.  **Read Phase**: The `TensorStore` operations in `_deserialize_arrays` allocate a NumPy array (`np.zeros`) large enough to hold the **entire local shard** for each parameter.
+2.  **Buffer Phase**: Data is read from storage into this host-memory buffer.
+3.  **Transfer Phase**: The entire buffer is moved to the accelerator using `jax.device_put`.
+4.  **Cleanup**: The host-memory buffer is released only after the `jax.Array` has been created.
+
+### Implications
+-   **Host RAM Requirement**: The worker machine must have enough CPU RAM to hold the *largest* local shard of the model parameters. 
+-   **No "Chunked" Transfer**: Data is not streamed in small chunks (e.g., 100MB at a time) through to the TPU. It is "store-and-forward" at the granularity of the full shard.
+-   **Concurrency**: While individual shards are buffered, `asyncio.gather` is used to process multiple parameters concurrently, which can increase peak host memory usage if many large parameters are loaded simultaneously.
