@@ -208,19 +208,9 @@ To achieve "streaming" (or at least granular batching) where memory is released 
 2.  **Sequential Dispatch**: It should call `self._dispatcher.dispatch(...)` sequentially for each chunk.
 3.  **Early Release**: After each dispatch call returns, the resulting `jax.Array`s (which are now effectively on the TPU, assuming the dispatcher moved them there) can have their CPU references dropped or handled by JAX's memory management.
 
-Basically, instead of:
-```python
-# Current: All-at-once
-all_results = dispatcher.dispatch(deserialize_all, args=all_params)
-```
-We would need:
-```python
-# Proposed: Streaming/Batching
-all_results = []
-for params_batch in batched(all_params):
-    batch_results = dispatcher.dispatch(deserialize_batch, args=params_batch)
-    all_results.extend(batch_results)
-    # At this point, Host RAM for batch_results should be releasable 
-    # as the data is already transferred to TPU by the dispatcher's output logic.
-```
-This would cap peak Host RAM usage to the size of the largest single batch (or single parameter).
+#### Addressing "All Shards Loaded" Concern
+It is correctly understood that for a **single** global `jax.Array`, JAX typically requires all its shards (distributed across the mesh) to be ready before the array is considered fully valid on the device.
+*   **Per-Array Atomicity**: Yes, for *Parameter A*, we generally load its full local shard on every host before `device_put` completes for *Parameter A*.
+*   **Independence**: However, *Parameter A* and *Parameter B* are independent. We do **not** need to wait for *Parameter B* to be loaded to finalize *Parameter A*.
+
+By batching the dispatch calls (e.g., dispatch Parameter A, then dispatch Parameter B), we ensure that the Host RAM used for buffering Parameter A is released (or recyclable) before we start buffering Parameter B.
